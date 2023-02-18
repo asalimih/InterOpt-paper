@@ -20,7 +20,10 @@ plot.measure.bar = function(res, measure, cls, wmethods=NULL, tip_num_size = 2.6
 	}
 	
 	measure_vec = d.m[[measure]]
-	y_limits = c(min(measure_vec)-0.5*min(measure_vec),
+	diff_range = max(measure_vec)-min(measure_vec)
+	# y_limits = c(min(measure_vec)-0.5*min(measure_vec),
+	# 			 max(measure_vec)+0.003*max(measure_vec) )
+	y_limits = c(max(c(min(measure_vec)-0.18*diff_range,0)),
 				 max(measure_vec)+0.003*max(measure_vec) )
 	txt_dodge = 0.01*(y_limits[2]-y_limits[1])
 
@@ -47,7 +50,7 @@ plot.measure.bar = function(res, measure, cls, wmethods=NULL, tip_num_size = 2.6
 	return(p)
 }
 
-plot.measure.box = function(res, measure, cls, wmethods=NULL) {
+plot.measure.box = function(res, measure, cls, wmethods=NULL, strip.text.size = 9) {
 	d.m = melt(res$combs[[measure]])
 	d.m$Base = res$Base[match(d.m$variable,colnames(res$combs[[measure]]))]
 	colnames(d.m) = c('Method','value','Base')
@@ -73,7 +76,8 @@ plot.measure.box = function(res, measure, cls, wmethods=NULL) {
 			  #panel.grid.major = element_blank(),
 			  axis.text.x = element_blank(),
 			  panel.border = element_rect(colour='gray'),
-			  axis.ticks.x = element_blank())+guides(shape=NA)+
+			  axis.ticks.x = element_blank(),
+			  strip.text.x = element_text(size = strip.text.size))+guides(shape=NA)+
 		scale_fill_manual(values=cls)+xlab('')+
 		coord_cartesian(ylim = c(ylim1[1]/1.04, ylim1[2]*1.09))
 	return(p)
@@ -252,4 +256,40 @@ plot.box.grouped <- function(d,gr,mirnames,logFlag=TRUE,un="CPM",jitter=T,
 	if (oneCol) {cls = rep(colors[oneColNum],length(cls)); names(cls)=colnames(mirexp)[1:length(mirnames)]}
 	p = p+scale_fill_manual(values=cls, labels=mirnames)
 	p
+}
+
+plot.pairwise_wilcox_samplesize = function(resy, measure, wmethod_names ,wmethods=NULL){
+	res = as.data.frame(t(sapply(resy$mean_list, function(x) x[,measure])))
+	colnames(res) = wmethod_names
+	nn = ncol(res)
+	combs = combn(nn, 2)
+	comp_res = c()
+	gg = matrix(1,nn,nn) #matrix of the p values
+	
+	for(i in seq(ncol(combs))){
+		wtest1 = wilcox.test(res[[combs[2,i]]], res[[combs[1,i]]], paired = TRUE, alternative = "less")
+		wtest2 = wilcox.test(res[[combs[1,i]]], res[[combs[2,i]]], paired = TRUE, alternative = "less")
+		gg[combs[1,i],combs[2,i]] = wtest1$p.value
+		gg[combs[2,i],combs[1,i]] = wtest2$p.value
+	}
+	a = cormat_to_df(gg, colnames(res))
+	
+	a$p.value[a$p.value<0.01] = '<0.01'
+	a$p.value[a$p.value!='<0.01'] = 'ns'
+	a$p.value = factor(a$p.value)
+	
+	# filtering weight methods if provided
+	if(!is.null(wmethods)){
+		method_labels_x = sub('.*\\.(.*)','\\1',a$X)
+		method_labels_y = sub('.*\\.(.*)','\\1',a$Y)
+		keep = which((method_labels_x %in% wmethods) &
+					 	(method_labels_y %in% wmethods))
+		a = a[keep, ]
+	}
+	
+	ggplot(a, aes(X, Y, fill= p.value)) + 
+		geom_tile(color='white') +
+		scale_fill_manual(values = c(mycols[3],'lightgray'))+ 
+		labs(x = NULL, y = NULL) +
+		theme(axis.text.x = element_text(angle = 45, hjust=1))
 }

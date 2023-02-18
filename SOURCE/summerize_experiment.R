@@ -123,7 +123,8 @@ aggregate_measures = function(res, measures, keep_no_optims=F){
 		})
 	}
 	# add aggregated Stability
-	res_combs$Stability = calc_stability(res_combs, measures)
+	#res_combs$Stability = calc_stability(res_combs, measures)
+	res_combs$Stability = calc_stability(res_combs, c('SD','CV'))
 	return(res_combs)
 }
 

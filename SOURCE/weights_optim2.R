@@ -12,9 +12,9 @@ geom_sd = function(mat){
 }
 
 geom_sd.soft = function(mat){
-	var1 = var(mat[1,])
-	var2 = var(mat[2,])
-	covy = CovEst.soft(t(mat))$S[1,2]
+	var1 = stats::var(mat[1,])
+	var2 = stats::var(mat[2,])
+	covy = CovTools::CovEst.soft(t(mat))$S[1,2]
 	a = var1-covy
 	b = var2-covy
 	w = c(b,a)/(a+b)
@@ -24,14 +24,14 @@ geom_sd.soft = function(mat){
 geom_sd.hybrid = function(mat){
 	n = ncol(mat)
 	if(n<15){ #OAS_2
-		S = CovEst.2010OAS(t(mat))$S
+		S = CovTools::CovEst.2010OAS(t(mat))$S
 		var1 = S[1,1]
 		var2 = S[2,2]
 		covy = S[1,2]
 	}else if(n<85){ #soft
-		var1 = var(mat[1,])
-		var2 = var(mat[2,])
-		covy = CovEst.soft(t(mat))$S[1,2]
+		var1 = stats::var(mat[1,])
+		var2 = stats::var(mat[2,])
+		covy = CovTools::CovEst.soft(t(mat))$S[1,2]
 	}else{ #hard
 		return(geom_sd(mat))
 	}
@@ -44,7 +44,7 @@ geom_sd.hybrid = function(mat){
 sd_form16 = function(x){
 	a = min(x)
 	b = max(x)
-	m = median(x)
+	m = stats::median(x)
 	var = (((a-2*m+b)^2)/4+(b-a)^2)/12
 	return(var)
 }

@@ -48,6 +48,7 @@ char *ERROR_FILE_NAME;
 char *META_FILE_NAME;
 char *WEIGHT_FILE_NAME;
 char *COMBS_FILE_NAME;
+char *UNSTABLEMIRS_FILE_NAME;
 
 #ifdef _WIN32
 string LOCK_FILE_NAME = ".mirlock";
@@ -60,7 +61,7 @@ int MIRS;
 int SAMPLES;
 int METHOD = 1;
 int GEOMETRIC = 1;
-
+int NUMOFUNSTABLEMIRS = 0;
 int *groups;
 
 //const int SAMPLE_NUMBER_THRESHOLD = 19;
@@ -76,6 +77,8 @@ unsigned long long int indecesIndex = 0;
 
 char WeightFileName[100] = "sampletest_v1.txt";
 float* WeightofMeanHostFlat = 0;
+
+int* UnstablemiRsHostFlat = 0;
 
 ofstream errorFile;
 ofstream metaFile;
@@ -111,7 +114,7 @@ inline cudaError_t checkCuda(cudaError_t result)
 __global__ void kernelGeNorm(
     int MIRS, int SAMPLES, int COMBINATION_LENGTH, int combinationNumber, int METHOD, int GEOMETRIC,
     float *data, short int *combinations, float* cudaW, float *rankingAll, float *stabilityAll,
-    float *V, float *M, float *extraMir, float *M1, float *tmpA1, float *V1
+    float *V, float *M, float *extraMir, float *M1, float *tmpA1, float *V1, float *dataAll
 )
 {
     int index = blockIdx.x * blockDim.x + threadIdx.x;
@@ -131,20 +134,20 @@ __global__ void kernelGeNorm(
 		if (GEOMETRIC==1){ 
 			if (METHOD == 1){ //data is ct
 				for (i = 0; i < COMBINATION_LENGTH; i++)
-					extraMir[index * SAMPLES + j] += data[combinations[index * COMBINATION_LENGTH + i] * SAMPLES + j]*cudaW[index * COMBINATION_LENGTH + i];
+					extraMir[index * SAMPLES + j] += dataAll[combinations[index * COMBINATION_LENGTH + i] * SAMPLES + j]*cudaW[index * COMBINATION_LENGTH + i];
 			} else if (METHOD == 2){ //data is cpm
 				for (i = 0; i < COMBINATION_LENGTH; i++)
-					extraMir[index * SAMPLES + j] += log2f(data[combinations[index * COMBINATION_LENGTH + i] * SAMPLES + j])*cudaW[index * COMBINATION_LENGTH + i];
+					extraMir[index * SAMPLES + j] += log2f(dataAll[combinations[index * COMBINATION_LENGTH + i] * SAMPLES + j])*cudaW[index * COMBINATION_LENGTH + i];
 				extraMir[index * SAMPLES + j] = pow(2,extraMir[index * SAMPLES + j]);
 			}
 		} else {
 			if (METHOD == 1){ //data is ct
 				for (i = 0; i < COMBINATION_LENGTH; i++)
-					extraMir[index * SAMPLES + j] += pow(2, 30-data[combinations[index * COMBINATION_LENGTH + i] * SAMPLES + j])*cudaW[index * COMBINATION_LENGTH + i];
+					extraMir[index * SAMPLES + j] += pow(2, 30-dataAll[combinations[index * COMBINATION_LENGTH + i] * SAMPLES + j])*cudaW[index * COMBINATION_LENGTH + i];
 				extraMir[index * SAMPLES + j] = 30-log2f(extraMir[index * SAMPLES + j]);
 			} else if (METHOD == 2){ //data is cpm
 				for (i = 0; i < COMBINATION_LENGTH; i++)
-					extraMir[index * SAMPLES + j] += data[combinations[index * COMBINATION_LENGTH + i] * SAMPLES + j]*cudaW[index * COMBINATION_LENGTH + i];
+					extraMir[index * SAMPLES + j] += dataAll[combinations[index * COMBINATION_LENGTH + i] * SAMPLES + j]*cudaW[index * COMBINATION_LENGTH + i];
 			}
 		}
         //extraMir[index * SAMPLES + j] /= COMBINATION_LENGTH;
@@ -764,7 +767,49 @@ int mainGeNorm()
     //// START algorithm single
     auto timeAlgorithmSingleStart = chrono::system_clock::now();
     int i, j, k;
-
+    
+    //swap data and dataextracmiR and remove unstable miRs
+    int MIRSFiltered = MIRS - NUMOFUNSTABLEMIRS;
+    string** fileDataFiltered = new string*[MIRSFiltered + 1];
+    for (i = 0; i <= MIRSFiltered; i++) {
+        fileDataFiltered[i] = new string[SAMPLES + 1];//maybe unnecessary
+    }
+    /*cout<< "mainGeNorm::MIRSFiltered: "<<MIRSFiltered<<endl;
+    cout<< "mainGeNorm::MIRS: "<<MIRS<<endl;
+    cout<< "mainGeNorm::NUMOFUNSTABLEMIRS: "<<NUMOFUNSTABLEMIRS<<endl; 
+    for (i = 0; i < NUMOFUNSTABLEMIRS; i++){
+        cout<<"mainGeNorm::UnstablemiR["<<i<<"]: "<<UnstablemiRsHostFlat[i]<<endl;
+    }*/
+    int count=0;
+    cout << "NUMOFUNSTABLEMIRS: " << NUMOFUNSTABLEMIRS << endl;
+    for (i = 0; i <= MIRS; i++){
+       //cout<< "mainGeNorm::i: "<<i<<endl; 
+       int DelFlag = 0;
+       for (k = 0; k < NUMOFUNSTABLEMIRS; k++) {//algorithmic inefficient maybe need sorting
+           cout<< "mainGeNorm::k: "<<k<<endl;
+           if(UnstablemiRsHostFlat[k]==i){
+               DelFlag = 1;
+               break;
+           }
+       }
+       if(DelFlag==0){
+           //cout<< "mainGeNorm::i: "<<i<<endl;
+           for (j = 0; j <= SAMPLES; j++) {
+               fileDataFiltered[count][j] = fileData[i][j];
+           }
+           count++;
+       }
+        //cout<< "mainGeNorm::DelFlag: "<<DelFlag<<endl;
+        //cout<< "mainGeNorm::count: "<<count<<endl;
+    }
+    //swap
+    int MIRSORIG = MIRS;
+    MIRS = MIRSFiltered;
+    
+    string**fileDataTemp = fileDataFiltered;
+    fileDataFiltered = fileData;
+    fileData = fileDataTemp;
+    
     float **D = (float**)malloc(MIRS * sizeof(float*));
     for (i = 0; i < MIRS; i++) {
         D[i] = (float*)malloc(SAMPLES * sizeof(float));
@@ -777,7 +822,7 @@ int mainGeNorm()
     float *VFlat;
     float *dataFlat = (float*)malloc(MIRS * SAMPLES * sizeof(float));
     float *dataTmp = (float*)malloc(SAMPLES * sizeof(float));
-
+    float *dataFlatAll = (float*)malloc(MIRSORIG * SAMPLES * sizeof(float));
     VFlat = (float*)malloc(MIRS * MIRS * sizeof(float));
     
     float ***A3D;
@@ -826,7 +871,7 @@ int mainGeNorm()
                 sum += pow((A3D[j][k][i] - avg), 2);
             }
 
-            V[j][k] = sqrt(sum / (SAMPLES - 1));
+            V[j][k] = (sqrt(sum / (SAMPLES - 1)));
         }
     }
 
@@ -890,20 +935,38 @@ int mainGeNorm()
 
         }
     }
-
+    cout << "MIRS: " << MIRS << endl;
+    //print fileData
+    //for (i = 1; i <= MIRS; i++) {
+    //    for (j = 1; j <= SAMPLES; j++) {
+    //        cout << "[" << i <<"][" << j << "]: " << stof(fileData[i][j]) << endl;
+    //    }
+    //} 
+    //Array to control miRs in evaluation of stability
+    /*float *UnstablemiRs = (float*) malloc(MIRS * sizeof(float));
+    for (int o = 0; o < MIRS; o++) {
+        UnstablemiRs[o] = 1.0;//weight for contribution in stability
+    }*/
     auto timeAlgorithmSingleEnd = chrono::system_clock::now();
     metaFile << "time\talgorithmSingle" << "\t" << ((chrono::duration<double>)(timeAlgorithmSingleEnd - timeAlgorithmSingleStart) * 1000.0).count() << "\tms" << endl;
     //// END algorithm single
-
+    //cout<<"Start the procdure!" << endl;
     if (COMBINATION_LENGTH > 1) {
         if (writeToFile) outFile << "Name\tRanking\tStability\n";
-
+        //cout<< "mainGeNorm::c0"<<endl;
         for (i = 1; i <= MIRS; i++) {
             for (j = 1; j <= SAMPLES; j++) {
                 dataFlat[(i-1) * SAMPLES + j-1] = stof(fileData[i][j]);
             }
         }
-
+        //cout<< "mainGeNorm::c1"<<endl;
+        //flat all of data to be used in creating combinations
+        for (i = 1; i <= MIRSORIG; i++) {
+            for (j = 1; j <= SAMPLES; j++) {
+                dataFlatAll[(i-1) * SAMPLES + j-1] = stof(fileDataFiltered[i][j]);//fileDataFiltered is swaped with original fileData
+            }
+        }
+        //cout<< "mainGeNorm::c2"<<endl;
         float potentialMemory = (float)(
             MIRS * SAMPLES * sizeof(float)
             + MIRS * MIRS * sizeof(float)
@@ -945,6 +1008,7 @@ int mainGeNorm()
         float *cudaTmpA1;
         float *cudaV1;
         float *cudaW;
+        float *cudaDataAll; 
 
         //// START cuda malloc
         auto timeCudaMallocStart = chrono::system_clock::now();
@@ -958,7 +1022,8 @@ int mainGeNorm()
         checkCuda(cudaMalloc((float**)&cudaM1, batchSize * (MIRS + 1) * sizeof(float)));
         checkCuda(cudaMalloc((float**)&cudaTmpA1, batchSize * SAMPLES * sizeof(float)));
         checkCuda(cudaMalloc((float**)&cudaV1, batchSize * (MIRS + 1) * sizeof(float)));
-		checkCuda(cudaMalloc((float**)&cudaW,batchSize * COMBINATION_LENGTH * sizeof(float)));
+        checkCuda(cudaMalloc((float**)&cudaW,batchSize * COMBINATION_LENGTH * sizeof(float)));
+        checkCuda(cudaMalloc((float**)&cudaDataAll,MIRSORIG * SAMPLES * sizeof(float)));
         auto timeCudaMallocEnd = chrono::system_clock::now();
         metaFile << "time\tcudaMalloc" << "\t" << ((chrono::duration<double>)(timeCudaMallocEnd - timeCudaMallocStart) * 1000.0).count() << "\tms" << endl;
         //// END cuda malloc
@@ -1002,25 +1067,26 @@ int mainGeNorm()
             checkCuda(cudaMemcpy(cudaW, WeightofMeanHostFlatBatch, batchSize * COMBINATION_LENGTH * sizeof(float), cudaMemcpyHostToDevice));
             checkCuda(cudaMemcpy(cudaRanking, ranking, batchSize * sizeof(float), cudaMemcpyHostToDevice));
             checkCuda(cudaMemcpy(cudaStability, stabilityOut, batchSize * sizeof(float), cudaMemcpyHostToDevice));
+	        checkCuda(cudaMemcpy(cudaDataAll, dataFlatAll , MIRSORIG * SAMPLES * sizeof(float), cudaMemcpyHostToDevice));
             cudaEventRecord(stop, 0);
             cudaEventSynchronize(stop);
             cudaEventElapsedTime(&elapsedTimeMemcpyHtD, start, stop);
             metaFile << "time\tmemcpyHtD" << k << "\t" << elapsedTimeMemcpyHtD << "\tms" << endl;
             //// END memcpy HtD
-
+            //cout<< "mainGeNorm::c5"<<endl;
             //// START kernel
             cudaEventRecord(start, 0);
             kernelGeNorm << <blocksPerGrid, threadsPerBlock >> > 
                 (MIRS, SAMPLES, COMBINATION_LENGTH, batchSize, METHOD, GEOMETRIC,
                 cudaData, cudaCombinations, cudaW, cudaRanking, cudaStability, 
-                cudaV, cudaM, cudaExtraMir, cudaM1, cudaTmpA1, cudaV1);
+                cudaV, cudaM, cudaExtraMir, cudaM1, cudaTmpA1, cudaV1, cudaDataAll);
             //kernelGeNorm2 << <blocksPerGrid, threadsPerBlock >> > (MIRS, SAMPLES, COMBINATION_LENGTH, batchSize, METHOD, cudaData, cudaCombinations, cudaRanking, cudaStability, cudaV, cudaM);
             cudaEventRecord(stop, 0);
             cudaEventSynchronize(stop);
             cudaEventElapsedTime(&elapsedTimeKernel, start, stop);
             metaFile << "time\tkernel" << k << "\t" << elapsedTimeKernel << "\tms" << endl;
             //// END kernel
-
+            // cout<< "mainGeNorm::c6"<<endl;
             checkCuda(cudaPeekAtLastError());
 
             //// START memcpy DtH
@@ -1030,50 +1096,57 @@ int mainGeNorm()
             cudaEventRecord(stop, 0);
             cudaEventSynchronize(stop);
             cudaEventElapsedTime(&elapsedTimeMemcpyDtH, start, stop);
+            for(i=0;i<batchSize;i++)
+                cout << i << " : " << ranking[i] << endl;
+            /*for(i=0;i<batchSize;i++)
+                cout << i << " : " << stabilityOut[i] << endl;*/
             metaFile << "time\tmemcpyDtH" << k << "\t" << elapsedTimeMemcpyDtH << "\tms" << endl;
             //// END memcpy DtH
-			
+            //cout<< "mainGeNorm::c7"<<endl;	
             //// START file write
             auto timeFileWriteStart = chrono::system_clock::now();
-
+            //cout<< "mainGeNorm::c71"<<endl;
             for (i = 0; i < batchSize; i++) {
 				if(i>30)
 					display = false;
+                //cout<< "mainGeNorm::c72"<<endl;
 				if (display) cout<<i<<" ";
                 for (j = 0; j < COMBINATION_LENGTH; j++) {
-                    if (display) cout << fileData[mirCombinationsFlatBatch[i * COMBINATION_LENGTH + j] + 1][0];
-                    if (writeToFile) outFile << fileData[mirCombinationsFlatBatch[i * COMBINATION_LENGTH + j] + 1][0];
+                    if (display) cout << fileDataFiltered[mirCombinationsFlatBatch[i * COMBINATION_LENGTH + j] + 1][0];
+                    if (writeToFile) outFile << fileDataFiltered[mirCombinationsFlatBatch[i * COMBINATION_LENGTH + j] + 1][0];
 
                     if (j < COMBINATION_LENGTH - 1) {
                         if (display) cout << " + ";
                         if (writeToFile) outFile << " + ";
                     }
                 }
+                // cout<< "mainGeNorm::c73"<<endl;
                 if (display) cout << "\t" << ranking[i] << "\t" << stabilityOut[i] << "\n";
                 if (writeToFile) outFile << "\t" << ranking[i] << "\t" << stabilityOut[i] << "\n";
             }
-
+            //cout<< "mainGeNorm::c74"<<endl;
             auto timeFileWriteEnd = chrono::system_clock::now();
             metaFile << "time\tfileWrite" << k << "\t" << ((chrono::duration<double>)(timeFileWriteEnd - timeFileWriteStart) * 1000.0).count() << "\tms" << endl;
             //// END file write
-
+            //cout<< "mainGeNorm::c8"<<endl;
             auto timeBatchEnd = chrono::system_clock::now();
             metaFile << "time\tbatch" << k << "\t" << ((chrono::duration<double>)(timeBatchEnd - timeBatchStart) * 1000).count() << "\tms" << endl;
             //// END batch
         }
-
+        //cout<< "mainGeNorm::c9"<<endl;
         cudaFree(cudaData);
         cudaFree(cudaV);
         cudaFree(cudaM);
         cudaFree(cudaCombinations);
-		cudaFree(cudaW);
+        cudaFree(cudaW);
         cudaFree(cudaRanking);
         cudaFree(cudaStability);
-
+        cudaFree(dataFlatAll);
         free(stabilityOut);
         free(ranking);
         free(mirCombinationsFlatBatch);
-		free(WeightofMeanHostFlatBatch);
+        free(WeightofMeanHostFlatBatch);
+
     }
 
     if (writeToFile) outFile.close();
@@ -1086,7 +1159,7 @@ int mainGeNorm()
     }
     free(A3D);
     free(VFlat);
-
+    //cout<< "mainGeNorm::c10"<<endl;
     return 0;
 }
 
@@ -1148,7 +1221,8 @@ int mainNormFinder()
 
     float *sampleAvg = (float*)malloc(SAMPLES * sizeof(float));
     float *groupAvg = (float*)malloc(G * sizeof(float));
-
+	float highexp_n = 0;
+	
     for (i = 0; i < MIRS; i++) {
         for (j = 0; j < SAMPLES; j++) {
             mirAvg[i][groups[j]] += (D[i][j] / groupElements[groups[j]]);
@@ -1157,12 +1231,15 @@ int mainNormFinder()
 
     for (j = 0; j < SAMPLES; j++) {
         sampleAvg[j] = 0.0;
-
+		highexp_n = 0;
         for (i = 0; i < MIRS; i++) {
-            sampleAvg[j] += dataFlat[i * SAMPLES + j];
+			if (dataFlat[i * SAMPLES + j]<=35) {
+				sampleAvg[j] += dataFlat[i * SAMPLES + j];
+				highexp_n += 1;
+			}
         }
 
-        sampleAvg[j] /= MIRS;
+        sampleAvg[j] /= highexp_n;
     }
 
 
@@ -1409,7 +1486,7 @@ int mainNormFinder()
         checkCuda(cudaMalloc((float**)&cudaExtraMirAvg, batchSize * G * sizeof(float)));
         checkCuda(cudaMalloc((float**)&cudaExtraMirAvgCorr, batchSize * G * sizeof(float)));
         checkCuda(cudaMalloc((float**)&cudaSigma, batchSize * G * sizeof(float)));
-		checkCuda(cudaMalloc((float**)&cudaW,batchSize * COMBINATION_LENGTH * sizeof(float)));
+        checkCuda(cudaMalloc((float**)&cudaW,batchSize * COMBINATION_LENGTH * sizeof(float)));
 		
 		
         auto timeCudaMallocEnd = chrono::system_clock::now();
@@ -1448,7 +1525,7 @@ int mainNormFinder()
             cout << "blocks x: " << blocksPerGrid.x << endl;
 
             copy(mirCombinationsFlat + COMBINATION_LENGTH * batchSizeInit * k, mirCombinationsFlat + COMBINATION_LENGTH * (batchSizeInit * k + batchSize), mirCombinationsFlatBatch);
-			copy(WeightofMeanHostFlat + COMBINATION_LENGTH * batchSizeInit * k, WeightofMeanHostFlat + COMBINATION_LENGTH * (batchSizeInit * k + batchSize), WeightofMeanHostFlatBatch);
+            copy(WeightofMeanHostFlat + COMBINATION_LENGTH * batchSizeInit * k, WeightofMeanHostFlat + COMBINATION_LENGTH * (batchSizeInit * k + batchSize), WeightofMeanHostFlatBatch);
 			
             //// START memcpy HtD
             cudaEventRecord(start, 0);
@@ -1462,7 +1539,7 @@ int mainNormFinder()
             checkCuda(cudaMemcpy(cudaGroupAvg, groupAvg, G * sizeof(float), cudaMemcpyHostToDevice));
             checkCuda(cudaMemcpy(cudaDGroupAvg, dGroupAvg, G * sizeof(float), cudaMemcpyHostToDevice));
             checkCuda(cudaMemcpy(cudaStabilityInit, stabilityInit, MIRS * sizeof(float), cudaMemcpyHostToDevice));
-			checkCuda(cudaMemcpy(cudaW, WeightofMeanHostFlatBatch, batchSize * COMBINATION_LENGTH * sizeof(float), cudaMemcpyHostToDevice));
+            checkCuda(cudaMemcpy(cudaW, WeightofMeanHostFlatBatch, batchSize * COMBINATION_LENGTH * sizeof(float), cudaMemcpyHostToDevice));
 			
             cudaEventRecord(stop, 0);
             cudaEventSynchronize(stop);
@@ -1531,7 +1608,7 @@ int mainNormFinder()
         free(ranking);
         free(stabilityOut);
         free(mirCombinationsFlatBatch);
-		free(WeightofMeanHostFlatBatch);
+        free(WeightofMeanHostFlatBatch);
 		
         cudaFree(cudaData);
         cudaFree(cudaCombinations);
@@ -1543,7 +1620,7 @@ int mainNormFinder()
         cudaFree(cudaGroupAvg);
         cudaFree(cudaDGroupAvg);
         cudaFree(cudaStabilityInit);
-		cudaFree(cudaW);
+        cudaFree(cudaW);
     }
 
     return 0;
@@ -1693,7 +1770,7 @@ int mainBestKeeper()
         float *ranking = (float*)calloc(batchSize, sizeof(float));
         float *stabilityOut = (float*)calloc(batchSize, sizeof(float));
         short int *mirCombinationsFlatBatch = (short int*)malloc(batchSize * COMBINATION_LENGTH * sizeof(short int));
-		float *WeightofMeanHostFlatBatch = (float*)malloc(batchSize * COMBINATION_LENGTH * sizeof(float));
+        float *WeightofMeanHostFlatBatch = (float*)malloc(batchSize * COMBINATION_LENGTH * sizeof(float));
 
 
         float *cudaData;
@@ -1703,7 +1780,7 @@ int mainBestKeeper()
         float *cudaBKI;
         float *cudaStabilityInit;
         float *cudaExtraMir;
-		float *cudaW;
+        float *cudaW;
 
         //// START cuda malloc
         auto timeCudaMallocStart = chrono::system_clock::now();
@@ -1714,7 +1791,7 @@ int mainBestKeeper()
         checkCuda(cudaMalloc((float**)&cudaBKI, SAMPLES * sizeof(float)));
         checkCuda(cudaMalloc((float**)&cudaStabilityInit, MIRS * sizeof(float)));
         checkCuda(cudaMalloc((float**)&cudaExtraMir, batchSize * SAMPLES * sizeof(float)));
-		checkCuda(cudaMalloc((float**)&cudaW,batchSize * COMBINATION_LENGTH * sizeof(float)));
+        checkCuda(cudaMalloc((float**)&cudaW,batchSize * COMBINATION_LENGTH * sizeof(float)));
 
         auto timeCudaMallocEnd = chrono::system_clock::now();
         metaFile << "time\tcudaMalloc" << "\t" << ((chrono::duration<double>)(timeCudaMallocEnd - timeCudaMallocStart) * 1000.0).count() << "\tms" << endl;
@@ -1762,7 +1839,7 @@ int mainBestKeeper()
             checkCuda(cudaMemcpy(cudaStability, stabilityOut, batchSize * sizeof(float), cudaMemcpyHostToDevice));
             checkCuda(cudaMemcpy(cudaBKI, BKI, SAMPLES * sizeof(float), cudaMemcpyHostToDevice));
             checkCuda(cudaMemcpy(cudaStabilityInit, stabilityInit, MIRS * sizeof(float), cudaMemcpyHostToDevice));
-			checkCuda(cudaMemcpy(cudaW, WeightofMeanHostFlatBatch, batchSize * COMBINATION_LENGTH * sizeof(float), cudaMemcpyHostToDevice));
+            checkCuda(cudaMemcpy(cudaW, WeightofMeanHostFlatBatch, batchSize * COMBINATION_LENGTH * sizeof(float), cudaMemcpyHostToDevice));
 			
             cudaEventRecord(stop, 0);
             cudaEventSynchronize(stop);
@@ -1830,10 +1907,10 @@ int mainBestKeeper()
         cudaFree(cudaBKI);
         cudaFree(cudaStabilityInit);
         cudaFree(cudaExtraMir);
-		cudaFree(cudaW);
+	cudaFree(cudaW);
         
-		free(mirCombinationsFlatBatch);
-		free(WeightofMeanHostFlatBatch);
+	free(mirCombinationsFlatBatch);
+	free(WeightofMeanHostFlatBatch);
         free(ranking);
         free(stabilityOut);
         free(stabilityInit);
@@ -1851,6 +1928,42 @@ int mainBestKeeper()
     free(stabilityFinal);
 
     return 0;
+}
+bool ReadUnstablemiRsFile(){
+    char buffer[2];
+    int mirCountRow = 0;
+
+    FILE *file;
+    file = fopen(UNSTABLEMIRS_FILE_NAME, "r");
+    string CurrStringTmp = "";
+    if (file) {
+        auto timeFileReadStart = chrono::system_clock::now();
+        while (!feof(file)) {
+            if (fgets(buffer, 2, file) == NULL) break;
+
+            if (*buffer != ' ' && *buffer != '\n') {
+                CurrStringTmp.append(buffer);
+            }else{
+            //if (*buffer == ' ') {
+                UnstablemiRsHostFlat[mirCountRow] = stoi(CurrStringTmp);
+                mirCountRow++;
+                CurrStringTmp = "";
+            }
+	    //if(mirCountRow>NUMOFUNSTABLEMIRS) break;
+        }
+
+        // MIRS -= 2;
+        // SAMPLES -= 1;
+
+        fclose(file);
+
+        auto timeFileReadEnd = chrono::system_clock::now();
+        //metaFile << "time\tfileread\t" << ((chrono::duration<double>)(timeFileReadEnd - timeFileReadStart) * 1000).count() << "\tms" << endl;
+
+        return true;
+    } else {
+        return false;
+    }
 }
 
 bool ReadWeightFile(){
@@ -1873,20 +1986,17 @@ bool ReadWeightFile(){
             }
             
             if (*buffer == ' ') {
-				WeightofMeanHostFlat[mirCountRow] = stof(CurrStringTmp);
+                WeightofMeanHostFlat[mirCountRow] = stof(CurrStringTmp);
                 mirCountCol++;
-				CurrStringTmp = "";
+                CurrStringTmp = "";
             }
 
             if (*buffer == '\n') {
-
-				WeightofMeanHostFlat[mirCountRow] = stof(CurrStringTmp);
+                WeightofMeanHostFlat[mirCountRow] = stof(CurrStringTmp);
                 mirCountRow++;
                 mirCountCol = 0;
-				CurrStringTmp = "";
-
+                CurrStringTmp = "";
             }
-
         }
 
         // MIRS -= 2;
@@ -1911,7 +2021,7 @@ bool ReadCombsFile(){
 
     FILE *file;
     file = fopen(COMBS_FILE_NAME, "r");
-	cout << COMBS_FILE_NAME << "***" <<endl;
+    cout << COMBS_FILE_NAME << "***" <<endl;
     string CurrStringTmp = "";
     if (file) {
         auto timeFileReadStart = chrono::system_clock::now();
@@ -1926,18 +2036,18 @@ bool ReadCombsFile(){
             
             if (*buffer == ' ') {
 				
-				mirCombinationsFlat[mirCountRow] = stoi(CurrStringTmp);//stoi(CurrStringTmp);
+                mirCombinationsFlat[mirCountRow] = stoi(CurrStringTmp);//stoi(CurrStringTmp);
                 mirCountCol++;
-				CurrStringTmp = "";
+                CurrStringTmp = "";
             }
 
             if (*buffer == '\n') {
-				//cout << stoi(CurrStringTmp);
-				mirCombinationsFlat[mirCountRow] = stoi(CurrStringTmp);//stoi(CurrStringTmp);
+                //cout << stoi(CurrStringTmp);
+                mirCombinationsFlat[mirCountRow] = stoi(CurrStringTmp);//stoi(CurrStringTmp);
                 mirCountRow++;
                 mirCountCol = 0;
-				CurrStringTmp = "";
-				//cout << "dd"<< typeid(mirCombinationsFlat).name() << mirCombinationsFlat[mirCountRow] << endl;
+                CurrStringTmp = "";
+                //cout << "dd"<< typeid(mirCombinationsFlat).name() << mirCombinationsFlat[mirCountRow] << endl;
             }
 
         }
@@ -2047,7 +2157,7 @@ void filterInputData()
 
     for (i = 1; i <= MIRS; i++) {
         correctMir = true;
-
+        //cout << "filterInputData::c1 i: " << i <<endl;
         for (j = 1; j <= SAMPLES; j++) {
             if (fileData[i][j].empty()) {
                 correctMir = false;
@@ -2059,11 +2169,13 @@ void filterInputData()
 
                 if ((METHOD == 1 && tmpData < 0.0) || (METHOD == 2 && tmpData < 1.0)) {
                     correctMir = false;
+                    //cout << "filterInputData::c2 i: " << i <<endl;
                     break;
                 }
             }
             catch (const std::invalid_argument& ia) {
                 correctMir = false;
+                //cout << "filterInputData::c3 i: " << i <<endl;
                 break;
             }
         }
@@ -2161,7 +2273,24 @@ void sighandler(int sig)
 
 int main(int argc, char** argv)
 {
-    if (argc < 10 || (stoi(argv[1]) == 2 && argc < 11)) {
+    /*cout << "Version 2.1.1" << endl;
+    cout << "argc: " << argc << endl;
+    cout << "argv[0]: " << argv[0] << endl;
+    cout << "argv[1]: " << argv[1] << endl;
+    cout << "argv[2]: " << argv[2] << endl;
+    cout << "argv[3]: " << argv[3] << endl;
+    cout << "argv[4]: " << argv[4] << endl;
+    cout << "argv[5]: " << argv[5] << endl;
+    cout << "argv[6]: " << argv[6] << endl;
+    cout << "argv[7]: " << argv[7] << endl;
+    cout << "argv[8]: " << argv[8] << endl;
+    cout << "argv[9]: " << argv[9] << endl;
+    cout << "argv[10]: " << argv[10] << endl;
+    cout << "argv[11]: " << argv[11] << endl;
+    cout << "argv[12]: " << argv[12] << endl;
+    cout << "argv[13]: " << argv[13] << endl;
+    cout << "argv[14]: " << argv[14] << endl;*/
+    if (argc < 16 || (stoi(argv[1]) == 2 && argc < 17)) {
         cout << "How to run: " << endl
             << "  ./main [algo] [combLen] [fileName] [outFileName] [errFileName] [metaFileName] [mirs] [samples] [method] [groups*]" << endl
             << "    algo: 1 - GeNorm, 2 - NormFinder, 3 - BestKeeper" << endl
@@ -2197,22 +2326,23 @@ int main(int argc, char** argv)
         //signal(SIGTERM, &sighandler);
         //signal(SIGINT , &sighandler);
         //signal(SIGSEGV, &sighandler);
-
-        int i = 0;
+	int i = 0;
 
         ALGORITHM          = stoi(argv[1]);
         COMBINATION_LENGTH = stoi(argv[2]);
-		COMBINATION_NUMBER = stoi(argv[3]);
-        FILE_NAME          =      argv[4];
-        OUTPUT_FILE_NAME   =      argv[5];
-        ERROR_FILE_NAME    =      argv[6];
-        META_FILE_NAME     =      argv[7];
+        COMBINATION_NUMBER = stoi(argv[3]);
+        FILE_NAME          = argv[4];
+        OUTPUT_FILE_NAME   = argv[5];
+        ERROR_FILE_NAME    = argv[6];
+        META_FILE_NAME     = argv[7];
         MIRS               = stoi(argv[8]);
-        SAMPLES            = stoi(argv[9]);
+	SAMPLES            = stoi(argv[9]);
         METHOD             = stoi(argv[10]);
-		WEIGHT_FILE_NAME   = argv[11];
-		COMBS_FILE_NAME    = argv[12];
-		GEOMETRIC          = stoi(argv[13]);
+        WEIGHT_FILE_NAME   = argv[11];
+        COMBS_FILE_NAME    = argv[12];
+        GEOMETRIC          = stoi(argv[13]);
+        NUMOFUNSTABLEMIRS  = stoi(argv[14]);
+	UNSTABLEMIRS_FILE_NAME  = argv[15];
 
         metaFile.open(META_FILE_NAME);
         
@@ -2224,7 +2354,7 @@ int main(int argc, char** argv)
         }
 
         if (ALGORITHM == 2) {
-            string groupsString = argv[14];
+            string groupsString = argv[16];
 
             if (groupsString.length() != SAMPLES) {
                 writeToErrorFile("Incorrect groups length!");
@@ -2262,7 +2392,7 @@ int main(int argc, char** argv)
         }
 
         cout << "Algorithm: "          << (ALGORITHM == 1 ? "GeNorm" : ALGORITHM == 2 ? "NormFinder" : "BestKeeper") 
-            << " (" << ALGORITHM << ")" << endl;
+             << " (" << ALGORITHM << ")" << endl;
         cout << "Combination Length: " << COMBINATION_LENGTH << endl;
         cout << "File Name: "          << FILE_NAME << endl;
         cout << "Output File Name: "   << OUTPUT_FILE_NAME << endl;
@@ -2271,15 +2401,17 @@ int main(int argc, char** argv)
         cout << "Sample Number: "      << SAMPLES << endl;
         cout << "Method: "             << (METHOD == 1 ? "qPCR (log)" : "seq-uarray (expr)") << endl;
         cout << "Weight File Name: "   << WEIGHT_FILE_NAME << endl;
-		cout << "Combinations File Name: "   << COMBS_FILE_NAME << endl;
-		cout << "GEOMETRIC: "          << (GEOMETRIC == 0 ? "No" : "Yes") << endl;
+        cout << "Combinations File Name: "   << COMBS_FILE_NAME << endl;
+        cout << "GEOMETRIC: "          << (GEOMETRIC == 0 ? "No" : "Yes") << endl;
+        cout << "NUMOFUNSTABLEMIRS: "  << NUMOFUNSTABLEMIRS << endl;
+        cout << "Unstable miRs File Name: "   << UNSTABLEMIRS_FILE_NAME << endl;
 	    
         fileData = new string*[MIRS + 1]; //(string**)malloc((MIRS + 1) * sizeof(string*));
         for (i = 0; i <= MIRS; i++) {
             fileData[i] =   new string[SAMPLES + 1];//(string*)calloc((SAMPLES + 1), sizeof(string));
         }
-		
 
+	UnstablemiRsHostFlat =	(int*) malloc(NUMOFUNSTABLEMIRS * sizeof(int));
 		
         if (!readInputFile()) {
             writeToErrorFile("Input file does not exist!");
@@ -2315,9 +2447,9 @@ int main(int argc, char** argv)
         //calculateCombinationNumber(); the COMBINATION_LENGTH is obtained in command
         cout << "Combination number: " << COMBINATION_NUMBER << endl;
 		
-		// determine weights
+        // determine weights
         WeightofMeanHostFlat = new float[COMBINATION_NUMBER*COMBINATION_LENGTH];
-		if (!ReadWeightFile()) {
+        if (!ReadWeightFile()) {
             writeToErrorFile("Weight file does not exist!");
             cout << "ERROR: Weight file does not exist!" << endl;
             
@@ -2328,10 +2460,10 @@ int main(int argc, char** argv)
         }
 
         // determine Combination Indices
-		mirCombinationsFlat =  new int[COMBINATION_NUMBER * COMBINATION_LENGTH];
-		//mirCombinationsFlat = (unsigned int*)malloc(COMBINATION_NUMBER * COMBINATION_LENGTH * sizeof(unsigned int));
+        mirCombinationsFlat =  new int[COMBINATION_NUMBER * COMBINATION_LENGTH];
+        //mirCombinationsFlat = (unsigned int*)malloc(COMBINATION_NUMBER * COMBINATION_LENGTH * sizeof(unsigned int));
 
-		if (!ReadCombsFile()) {
+        if (!ReadCombsFile()) {
             writeToErrorFile("Combination file does not exist!");
             cout << "ERROR: Combination file does not exist!" << endl;
             
@@ -2342,6 +2474,17 @@ int main(int argc, char** argv)
         }
 		
 
+        // determine weights
+        UnstablemiRsHostFlat = new int[NUMOFUNSTABLEMIRS];
+        if (!ReadUnstablemiRsFile()) {
+            writeToErrorFile("UnstablemiRs file does not exist!");
+            cout << "ERROR: UnstablemiRs file does not exist!" << endl;
+
+            return interrupt();
+        }
+        else {
+            cout << "+ UnstablemiRs File read" << endl;
+        }
         auto timeCombDetEnd = chrono::system_clock::now();
         metaFile << "time\tcombdet\t" << ((chrono::duration<double>)(timeCombDetEnd - timeCombDetStart) * 1000).count() << "\tms" << endl;
         //// END Combination determination
@@ -2378,7 +2521,7 @@ int main(int argc, char** argv)
 		for (i = 0; i <= MIRS; i++) {
             delete[] fileData[i];
         }
-		delete[] fileData;
+        delete[] fileData;
         free(mirCombinationsFlat);
         free(indeces);
 
